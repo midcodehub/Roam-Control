@@ -10,7 +10,7 @@ You need your physical iPhone, Developer Mode and LocalDevVPN.
 2. On **Device Setup**, tap **Pair This iPhone**.
 3. Allow Local Network access when iOS asks.
 4. Open **Settings → Privacy & Security → Developer Mode → Pair with Roam Control**.
-5. Enter the six-digit code shown by Roam Control.
+5. Enter the six-digit code Roam Control then shows as a notification. It also appears in Device Setup and on the map banner. Allow notifications when asked so the code can appear over Settings.
 6. Install LocalDevVPN from the Device Setup screen if it is not already installed.
 7. Open LocalDevVPN and connect its local tunnel.
 

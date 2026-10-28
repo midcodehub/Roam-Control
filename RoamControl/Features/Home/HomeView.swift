@@ -154,10 +154,10 @@ struct HomeView: View {
                                 .foregroundStyle(.blue)
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Pair this iPhone")
+                                Text(pairingPromptTitle)
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.primary)
-                                Text("Required before location control")
+                                Text(pairingPromptMessage)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -499,6 +499,30 @@ struct HomeView: View {
             true
         case .checking, .importing, .paired:
             false
+        }
+    }
+
+    // Device Setup can be closed while pairing continues, so the banner mirrors the
+    // attempt and, most importantly, the code Settings is waiting for.
+    private var pairingPromptTitle: String {
+        switch appModel.onDevicePairing.phase {
+        case .showingPIN(let pin):
+            return "Pairing code: \(pin)"
+        case .preparing, .waitingForSettings:
+            return "Finish pairing in Settings"
+        case .idle, .storing, .cancelling, .success, .failed:
+            return "Pair this iPhone"
+        }
+    }
+
+    private var pairingPromptMessage: String {
+        switch appModel.onDevicePairing.phase {
+        case .showingPIN:
+            return "Enter this code in Settings"
+        case .preparing, .waitingForSettings:
+            return "Developer Mode › Pair with Roam Control"
+        case .idle, .storing, .cancelling, .success, .failed:
+            return "Required before location control"
         }
     }
 

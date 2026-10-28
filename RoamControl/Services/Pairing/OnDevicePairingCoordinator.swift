@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import UIKit
+import UserNotifications
 import RoamPairingFFI
 
 struct PairedDeviceDetails: Equatable, Sendable {
@@ -66,6 +67,7 @@ final class OnDevicePairingCoordinator {
     var onPhaseChange: ((OnDevicePairingPhase) -> Void)?
 
     private let publisher = PairingBonjourPublisher()
+    private let codeNotifier = PairingCodeNotifier()
     private var activeSession: OpaquePointer?
     private var activeRunIdentifier: UUID?
     private var backgroundAssertion = UIBackgroundTaskIdentifier.invalid
@@ -113,6 +115,10 @@ final class OnDevicePairingCoordinator {
         pendingFailureMessage = nil
         recordStore = storeRecord
         phase = .preparing
+
+        // Ask now, while Roam Control is in the foreground. The code itself only arrives
+        // after the user has switched to Settings.
+        codeNotifier.requestAuthorization()
 
         taskConfigurationStatus = BackgroundTaskIdentifier.configurationStatus(for: "pairing")
 
@@ -216,6 +222,7 @@ final class OnDevicePairingCoordinator {
     fileprivate func presentPIN(_ pin: String) {
         guard workerIsRunning, !cancellationRequested else { return }
         phase = .showingPIN(pin)
+        codeNotifier.post(pin)
     }
 
     private func advertisementDidPublish() {
@@ -310,6 +317,9 @@ final class OnDevicePairingCoordinator {
     }
 
     private func finishBackgroundTask(success: Bool) {
+        // Every attempt ends here (success, failure, cancellation or timeout), and the
+        // code is single-use, so withdraw its notification.
+        codeNotifier.clear()
         guard !backgroundTaskFinished else { return }
         backgroundTaskFinished = true
         if backgroundAssertion != .invalid {
@@ -414,6 +424,41 @@ private final class PairingBonjourPublisher: NSObject, NetServiceDelegate {
         MainActor.assumeIsolated {
             onFailure?()
         }
+    }
+}
+
+/// Shows the pairing code as a notification banner over Settings.
+///
+/// The native engine generates the code only after the user taps Pair with Roam Control
+/// in Settings. Roam Control is in the background by then, so without this banner the
+/// user would have to leave Settings to read the code from Device Setup. The code never
+/// leaves the iPhone; the notification is removed as soon as the attempt finishes.
+@MainActor
+private final class PairingCodeNotifier {
+    private let identifier = "com.sean.roamcontrol.pairing-code"
+
+    func requestAuthorization() {
+        // Declining only loses the banner; the code is still shown in Roam Control.
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    func post(_ pin: String) {
+        // In the foreground, Device Setup and the map banner already show the code.
+        guard UIApplication.shared.applicationState != .active else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Pairing code: \(pin)"
+        content.body = "Enter \(pin) in Settings to finish pairing Roam Control."
+        content.sound = .default
+
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { _ in }
+    }
+
+    func clear() {
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+        center.removeDeliveredNotifications(withIdentifiers: [identifier])
     }
 }
 

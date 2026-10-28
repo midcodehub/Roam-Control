@@ -76,7 +76,7 @@ Read the complete [installation guide](Documentation/Installation.md) before ins
 2. Complete the four-page introduction.
 3. Tap **Pair This iPhone** on Device Setup.
 4. Open **Settings → Privacy & Security → Developer Mode → Pair with Roam Control**.
-5. Enter the six-digit code shown in Roam Control.
+5. Enter the six-digit code Roam Control then shows as a notification (it also appears in Device Setup and on the map banner).
 6. Install and connect LocalDevVPN.
 7. Choose a location or walking route.
 

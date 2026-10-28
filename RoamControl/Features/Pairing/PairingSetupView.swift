@@ -154,7 +154,11 @@ struct PairingSetupView: View {
                     .font(.subheadline.weight(.semibold))
                 instructionRow("Open Settings › Privacy & Security › Developer Mode.")
                 instructionRow("Tap Pair with Roam Control.")
-                instructionRow("Use the code shown here when iOS asks for it.")
+                instructionRow("A six-digit code then appears as a Roam Control notification and on this screen. Type it into Settings.")
+                Text("Go straight to Settings: Roam Control can only wait in the background for about 30 seconds.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
         case .showingPIN(let pin):
