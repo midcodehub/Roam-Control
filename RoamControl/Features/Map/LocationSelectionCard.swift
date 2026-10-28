@@ -23,7 +23,6 @@ struct LocationSelectionCard: View {
 
     @AppStorage(RoamPreferenceKeys.autoConvertGCJ02) private var autoConvertGCJ02 = true
     @AppStorage(RoamPreferenceKeys.enableLocationJitter) private var enableLocationJitter = true
-    @AppStorage(RoamPreferenceKeys.autoDetachAfterInject) private var autoDetachAfterInject = true
 
     @State private var didCopyCoordinates = false
     @State private var isConfirmingStop = false
@@ -168,11 +167,6 @@ struct LocationSelectionCard: View {
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Auto-correct GCJ-02 → WGS-84", isOn: $autoConvertGCJ02)
                 Toggle("Micro-jitter after injecting", isOn: $enableLocationJitter)
-                Toggle("Auto Lock & Detach after inject", isOn: $autoDetachAfterInject)
-                Text("With auto-detach on, the tunnel is dropped once the location is confirmed, so LocalDevVPN can be turned off. Stop & Restore always reconnects to clear it.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             .font(.footnote)
             .padding(.top, 6)

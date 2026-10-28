@@ -43,7 +43,6 @@ enum MapDisplayStyle: String, CaseIterable, Identifiable {
 enum RoamPreferenceKeys {
     static let autoConvertGCJ02 = "autoConvertGCJ02"
     static let enableLocationJitter = "enableLocationJitter"
-    static let autoDetachAfterInject = "autoDetachAfterInject"
     static let lastLockedLocation = "lastLockedLocation"
     static let lastUsedLocation = "lastUsedLocation"
     static let isLocationLockedAndDetached = "isLocationLockedAndDetached"

@@ -34,7 +34,6 @@ final class AppModel {
     private(set) var detachNotice: String?
 
     private let locationVerifier = LocationInjectionVerifier()
-    private var autoDetachTask: Task<Void, Never>?
     private var isRestoringFromLock = false
 
     private var activeSessionRecovery: SessionRecoveryRecord?
@@ -263,8 +262,6 @@ final class AppModel {
         isLocationLockedAndDetached = false
         lastLockedTarget = nil
         detachNotice = nil
-        autoDetachTask?.cancel()
-        autoDetachTask = nil
         isRestoringFromLock = false
         favouriteLocations = []
         locationHistory = []
@@ -411,14 +408,6 @@ final class AppModel {
         detachNotice = message
         usageAnalytics.recordFailure(.locationPreparation, context: .restoration, enabled: sharesAnonymousUsageStatistics)
         usageAnalytics.record(.locationRestoreFailed, enabled: sharesAnonymousUsageStatistics)
-    }
-
-    private func scheduleAutoDetach() {
-        guard autoDetachTask == nil else { return }
-        autoDetachTask = Task { @MainActor [weak self] in
-            await self?.detachAndLockCurrentLocation()
-            self?.autoDetachTask = nil
-        }
     }
 
     /// Lock & Detach: wait for the micro-jitter warm-up, confirm through CoreLocation that the
@@ -594,8 +583,6 @@ final class AppModel {
             return
         }
         clearLockedState()
-        autoDetachTask?.cancel()
-        autoDetachTask = nil
         isStoppingLocationSessionForRestoration = true
         deviceSession.stop()
     }
@@ -676,12 +663,10 @@ final class AppModel {
                     }
                 }
             } else {
+                // Deliberately no automatic detach: the DVT location-simulation service only
+                // holds the simulated position while its connection stays open, so dropping the
+                // tunnel straight after injecting returns the iPhone to its real location.
                 persistActiveSessionRecovery(at: target)
-
-                let autoDetach = preferences.object(forKey: RoamPreferenceKeys.autoDetachAfterInject) as? Bool ?? true
-                if autoDetach, activeSessionRecovery?.kind == .fixedLocation {
-                    scheduleAutoDetach()
-                }
             }
         case .failed(let message):
             pendingSessionAnalyticsEvent = nil
