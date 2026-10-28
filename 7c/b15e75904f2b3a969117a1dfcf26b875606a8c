@@ -1,0 +1,21 @@
+RoamControl/Features/Pairing/PairingSetupView.swift
+  s_842cf500244014::t_62902e56e756e0 221-232
+  s_842cf500244014::t_629d2c823ea8aa 8,11,14-16
+  s_842cf500244014::t_0da57116fdc389 29-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "7cb15e75904f2b3a969117a1dfcf26b875606a8c",
+  "prompts": {},
+  "sessions": {
+    "s_842cf500244014": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "341866f4-0902-4b8e-82ea-2ad22fb89bb1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "midcodehub <midcode@foxmail.com>"
+    }
+  }
+}
