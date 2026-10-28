@@ -208,7 +208,7 @@ final class MapViewModel: NSObject, MKLocalSearchCompleterDelegate {
                 return
             }
 
-            let coordinate = item.location.coordinate
+            let coordinate = item.placemark.coordinate
             let target = LocationTarget(
                 name: item.name ?? searchQuery,
                 subtitle: placeDescription(for: item),
@@ -255,25 +255,22 @@ final class MapViewModel: NSObject, MKLocalSearchCompleterDelegate {
             )
         }
 
-        guard let request = MKReverseGeocodingRequest(
-            location: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-        ) else {
-            selectedLocation = LocationTarget(
-                name: fallbackName,
-                subtitle: fallbackDescription,
-                latitude: coordinate.latitude,
-                longitude: coordinate.longitude
-            )
-            return
-        }
-
         do {
-            let items = try await request.mapItems
-            guard selectedLocation?.id == pendingTarget.id, let item = items.first else { return }
+            let geocoder = CLGeocoder()
+            let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            let placemarks = try await geocoder.reverseGeocodeLocation(location)
+            guard selectedLocation?.id == pendingTarget.id, let placemark = placemarks.first else { return }
+
+            let name = placemark.name ?? placemark.thoroughfare ?? fallbackName
+            let subtitle = [
+                placemark.subLocality,
+                placemark.locality,
+                placemark.administrativeArea
+            ].compactMap { $0 }.joined(separator: ", ")
 
             selectedLocation = LocationTarget(
-                name: item.name ?? fallbackName,
-                subtitle: placeDescription(for: item),
+                name: name,
+                subtitle: subtitle.isEmpty ? fallbackDescription : subtitle,
                 latitude: coordinate.latitude,
                 longitude: coordinate.longitude
             )
@@ -347,22 +344,18 @@ final class MapViewModel: NSObject, MKLocalSearchCompleterDelegate {
     }
 
     private func placeDescription(for item: MKMapItem) -> String {
-        let invisibleCharacters = CharacterSet.whitespacesAndNewlines.union(
-            CharacterSet(charactersIn: "\u{200B}\u{200C}\u{200D}\u{FEFF}")
-        )
-        let candidates = [
-            item.address?.shortAddress,
-            item.addressRepresentations?.cityWithContext,
-            item.address?.fullAddress
-        ]
+        let placemark = item.placemark
+        let components = [
+            placemark.subThoroughfare.flatMap { num in placemark.thoroughfare.map { "\($0) \(num)" } } ?? placemark.thoroughfare,
+            placemark.subLocality,
+            placemark.locality,
+            placemark.administrativeArea
+        ].compactMap { $0 }
 
-        for candidate in candidates {
-            let detail = candidate?.trimmingCharacters(in: invisibleCharacters) ?? ""
-            if !detail.isEmpty {
-                return detail
-            }
+        if !components.isEmpty {
+            return components.joined(separator: ", ")
         }
-        return "Location details unavailable"
+        return placemark.title ?? "Map search result"
     }
 
     private func requestCurrentLocation(
