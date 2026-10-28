@@ -3,7 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-OUTPUT_DIR="${1:-${PROJECT_ROOT}/build/output}"
+RAW_OUTPUT_DIR="${1:-${PROJECT_ROOT}/build/output}"
+mkdir -p "${RAW_OUTPUT_DIR}"
+OUTPUT_DIR="$(cd "${RAW_OUTPUT_DIR}" && pwd)"
 ARCHIVE_PATH="${PROJECT_ROOT}/build/RoamControl.xcarchive"
 PAYLOAD_DIR="${PROJECT_ROOT}/build/Payload"
 
