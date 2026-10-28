@@ -5,10 +5,15 @@ struct PairingSetupView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isImporting = false
     @State private var isConfirmingRemoval = false
+    @State private var isLocalDevVPNInstalled = false
 
     private let localDevVPNURL = URL(string: "https://apps.apple.com/app/localdevvpn/id6755608044")!
+    // Any URL in LocalDevVPN's scheme launches the installed app. The scheme is listed in
+    // LSApplicationQueriesSchemes, which canOpenURL requires to report installation.
+    private let localDevVPNAppURL = URL(string: "localdevvpn://")!
 
     var body: some View {
         NavigationStack {
@@ -21,6 +26,11 @@ struct PairingSetupView: View {
                 .padding(16)
             }
             .background(Color(uiColor: .systemGroupedBackground))
+            // Re-check on return so installing LocalDevVPN from the App Store switches the button.
+            .task(id: scenePhase) {
+                guard scenePhase == .active else { return }
+                isLocalDevVPNInstalled = UIApplication.shared.canOpenURL(localDevVPNAppURL)
+            }
             .navigationTitle("Device Setup")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -208,11 +218,19 @@ struct PairingSetupView: View {
             requirementRow(number: "2", text: "Install LocalDevVPN and switch it on.")
             requirementRow(number: "3", text: "Keep Developer Mode enabled on the iPhone.")
 
-            Link(destination: localDevVPNURL) {
-                Label("View LocalDevVPN", systemImage: "arrow.up.right.square")
-                    .frame(maxWidth: .infinity)
+            if isLocalDevVPNInstalled {
+                Link(destination: localDevVPNAppURL) {
+                    Label("Open LocalDevVPN", systemImage: "arrow.up.forward.app")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Link(destination: localDevVPNURL) {
+                    Label("Get LocalDevVPN", systemImage: "arrow.up.right.square")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.bordered)
 
             Text("New on-device pairing is available on iOS 27. The simulator can test the screen, but Apple only exposes the real handshake on a physical iPhone.")
                 .font(.caption)
