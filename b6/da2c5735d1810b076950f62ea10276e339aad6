@@ -1,0 +1,21 @@
+RoamControl/App/AppModel.swift
+  s_842cf500244014::t_d791721f35b570 666-668
+RoamControl/Features/Settings/SettingsView.swift
+  s_842cf500244014::t_9185859e74f18e 69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "b6da2c5735d1810b076950f62ea10276e339aad6",
+  "prompts": {},
+  "sessions": {
+    "s_842cf500244014": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "341866f4-0902-4b8e-82ea-2ad22fb89bb1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "midcodehub <midcode@foxmail.com>"
+    }
+  }
+}
