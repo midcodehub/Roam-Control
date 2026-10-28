@@ -349,21 +349,21 @@ struct LocationSelectionCard: View {
         if showsRestoreAsPrimary {
             return "Restore Real Location"
         }
-        return switch sessionPhase {
+        switch sessionPhase {
         case .openingLocalDevVPN:
-            "Opening LocalDevVPN…"
+            return "Opening LocalDevVPN…"
         case .discovering:
-            "Finding This iPhone…"
+            return "Finding This iPhone…"
         case .connecting:
-            "Starting Location…"
+            return "Starting Location…"
         case .active:
-            isShowingActiveTarget ? "Stop & Restore" : "Update Location"
+            return isShowingActiveTarget ? "Stop & Restore" : "Update Location"
         case .stopping:
-            "Restoring Real Location…"
+            return "Restoring Real Location…"
         case .failed:
-            "Try Again"
+            return "Try Again"
         case .idle:
-            "Start Location"
+            return "Start Location"
         }
     }
 
@@ -371,11 +371,15 @@ struct LocationSelectionCard: View {
         if showsRestoreAsPrimary {
             return "lock.slash.fill"
         }
-        return switch sessionPhase {
-        case .active: isShowingActiveTarget ? "stop.circle.fill" : "location.fill"
-        case .failed: "arrow.clockwise"
-        case .idle: "location.fill"
-        case .openingLocalDevVPN, .discovering, .connecting, .stopping: "hourglass"
+        switch sessionPhase {
+        case .active:
+            return isShowingActiveTarget ? "stop.circle.fill" : "location.fill"
+        case .failed:
+            return "arrow.clockwise"
+        case .idle:
+            return "location.fill"
+        case .openingLocalDevVPN, .discovering, .connecting, .stopping:
+            return "hourglass"
         }
     }
 
@@ -408,7 +412,7 @@ struct LocationSelectionCard: View {
         if isLocked, sessionPhase == .idle, let location {
             return "A different location is still locked. Starting \(location.name) replaces it; Restore Real Location clears it."
         }
-        return switch sessionPhase {
+        switch sessionPhase {
         case .idle:
             return isPaired
                 ? "Start when ready. Stop restores this iPhone's real location."
