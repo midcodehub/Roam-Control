@@ -26,7 +26,7 @@ concurrency:
 jobs:
   build-ipa:
     name: Build Roam Control IPA
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     permissions:
       contents: write
@@ -42,12 +42,13 @@ jobs:
           echo "=== Installed Xcode Applications ==="
           ls -d /Applications/Xcode*.app || true
           
-          # Prioritize Xcode 16 or latest available stable Xcode on runner
-          if [ -d "/Applications/Xcode_16.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.app
-          elif [ -d "/Applications/Xcode_15.4.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_15.4.app
+          # Automatically select highest available Xcode version (e.g. Xcode 16.x)
+          LATEST_XCODE=$(ls -d /Applications/Xcode_1*.app 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "$LATEST_XCODE" ]; then
+            echo "Selecting latest Xcode: ${LATEST_XCODE}"
+            sudo xcode-select -s "${LATEST_XCODE}"
           elif [ -d "/Applications/Xcode.app" ]; then
+            echo "Selecting /Applications/Xcode.app"
             sudo xcode-select -s /Applications/Xcode.app
           fi
           
