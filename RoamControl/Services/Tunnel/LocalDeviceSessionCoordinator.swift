@@ -1,4 +1,5 @@
 import BackgroundTasks
+import CoreLocation
 import Foundation
 import Network
 import Observation
@@ -141,6 +142,11 @@ final class LocalDeviceSessionCoordinator: NSObject {
     private var schedulerRegistrationAccepted = false
     private var workerIsRunning = false
     private var cancellationRequested = false
+    private(set) var isDetachedLocked = false
+    private var jitterTask: Task<Void, Never>?
+    private var jitterRequested = false
+    /// The stable WGS-84 coordinate most recently handed to the device, without jitter.
+    private(set) var lastSentDeviceCoordinate: CLLocationCoordinate2D?
     private var pendingFailureMessage: String?
     private var restorationDisplayStartDate: Date?
 
@@ -171,8 +177,15 @@ final class LocalDeviceSessionCoordinator: NSObject {
         }
     }
 
-    func start(pairingRecord: Data, target: LocationTarget) {
+    /// - Parameter enableJitter: Send a four-frame micro-jitter warm-up after the session opens.
+    ///   Only fixed-location sessions should request it; walking and restoration must not.
+    func start(pairingRecord: Data, target: LocationTarget, enableJitter: Bool = false) {
         guard !workerIsRunning, !isBusy else { return }
+        jitterTask?.cancel()
+        jitterTask = nil
+        jitterRequested = enableJitter && Self.isJitterPreferenceEnabled
+        isDetachedLocked = false
+        lastSentDeviceCoordinate = nil
         terminalFailureReported = false
         retryTelemetry.reset()
         schedulerFailureReason = nil
@@ -214,8 +227,12 @@ final class LocalDeviceSessionCoordinator: NSObject {
         }
     }
 
+    /// - Parameters:
+    ///   - target: Map coordinate (GCJ-02 inside mainland China). It is corrected to WGS-84
+    ///     here, the single place every update path funnels through, while the UI keeps `target`.
+    ///   - jitter: Perturb the first frame and follow with the remaining warm-up frames.
     @discardableResult
-    func updateLocation(_ target: LocationTarget) -> ActiveLocationUpdateResult {
+    func updateLocation(_ target: LocationTarget, jitter: Bool = false) -> ActiveLocationUpdateResult {
         guard
             workerIsRunning,
             case .active = phase,
@@ -223,17 +240,36 @@ final class LocalDeviceSessionCoordinator: NSObject {
             let pendingSession
         else { return .unavailable }
 
-        guard rc_location_session_update(activeSession, target.latitude, target.longitude) == 0 else {
+        // A newer location supersedes any warm-up that is still in flight.
+        jitterTask?.cancel()
+        jitterTask = nil
+
+        let base = deviceCoordinate(for: target)
+        let useJitter = jitter && Self.isJitterPreferenceEnabled
+        let first = useJitter ? Self.perturbed(base, amplitude: Self.jitterAmplitude) : base
+        guard rc_location_session_update(activeSession, first.latitude, first.longitude) == 0 else {
             fail("Roam Control could not update the active location.")
             return .failed
         }
+        lastSentDeviceCoordinate = base
 
         self.pendingSession = PendingSession(
             pairingRecord: pendingSession.pairingRecord,
             target: target
         )
         phase = .active(target)
+        if useJitter {
+            startJitterFollowUp(around: base)
+        }
         return .updated
+    }
+
+    /// Suspends until the micro-jitter warm-up (if any) has written its final frame.
+    func waitForJitterToFinish() async {
+        while let task = jitterTask {
+            await task.value
+            if jitterTask == task { jitterTask = nil }
+        }
     }
 
     func openLocalDevVPN() {
@@ -315,6 +351,9 @@ final class LocalDeviceSessionCoordinator: NSObject {
     }
 
     func stop() {
+        jitterTask?.cancel()
+        jitterTask = nil
+        isDetachedLocked = false
         backgroundKeepAlive.stop()
         mobileDataGuidance = nil
         switch phase {
@@ -345,6 +384,25 @@ final class LocalDeviceSessionCoordinator: NSObject {
             clearPendingSession()
             phase = .idle
         }
+    }
+
+    /// Lock & Detach: leave the last injected coordinate in place and drop the tunnel.
+    /// Unlike `stop()` this never asks the device to clear the simulation; the native layer
+    /// only flushes the newest coordinate and then closes its client-side connection.
+    /// - Returns: `false` when no active session exists, in which case nothing was changed.
+    @discardableResult
+    func detach() -> Bool {
+        guard case .active = phase, workerIsRunning, let activeSession else { return false }
+        jitterTask?.cancel()
+        jitterTask = nil
+        isDetachedLocked = true
+        backgroundKeepAlive.stop()
+        mobileDataGuidance = nil
+        cancellationRequested = true
+        restorationStatus = "Location locked; tunnel detached"
+        phase = .stopping
+        rc_location_session_detach(activeSession)
+        return true
     }
 
     func reset() {
@@ -566,7 +624,13 @@ final class LocalDeviceSessionCoordinator: NSObject {
         let sessionBits = UInt(bitPattern: session)
         let contextBits = UInt(bitPattern: Unmanaged.passRetained(self).toOpaque())
         let pairingRecord = pendingSession.pairingRecord
-        let target = pendingSession.target
+        let base = deviceCoordinate(for: pendingSession.target)
+        lastSentDeviceCoordinate = base
+        // With jitter requested the very first frame is already perturbed, so the device
+        // never sees a single dead coordinate.
+        let initialCoordinate = jitterRequested
+            ? Self.perturbed(base, amplitude: Self.jitterAmplitude)
+            : base
         let peerAddressString = Self.localDevVPNPeerAddress
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -592,8 +656,8 @@ final class LocalDeviceSessionCoordinator: NSObject {
                                 resolvedService.port,
                                 serviceIdentifier,
                                 authTag,
-                                target.latitude,
-                                target.longitude,
+                                initialCoordinate.latitude,
+                                initialCoordinate.longitude,
                                 locationStartedCallback,
                                 context,
                                 &result
@@ -630,6 +694,66 @@ final class LocalDeviceSessionCoordinator: NSObject {
         if mobileDataGuidance == .turnOff {
             mobileDataGuidance = .turnBackOn
         }
+
+        if jitterRequested, let base = lastSentDeviceCoordinate {
+            startJitterFollowUp(around: base)
+        }
+    }
+
+    // MARK: - GCJ-02 correction and micro-jitter
+
+    private static let jitterAmplitude = 0.000012
+    private static let finalJitterAmplitude = 0.000001
+    private static let jitterFrameInterval: Duration = .milliseconds(350)
+
+    private static var isJitterPreferenceEnabled: Bool {
+        UserDefaults.standard.object(forKey: RoamPreferenceKeys.enableLocationJitter) as? Bool ?? true
+    }
+
+    /// Converts a map coordinate to the WGS-84 value the device expects, honouring the
+    /// `autoConvertGCJ02` preference. Every send path in this class goes through here.
+    private func deviceCoordinate(for target: LocationTarget) -> CLLocationCoordinate2D {
+        let autoConvert = UserDefaults.standard.object(
+            forKey: RoamPreferenceKeys.autoConvertGCJ02
+        ) as? Bool ?? true
+        return CoordinateConverter.convertToWGS84IfNeeded(
+            coordinate: target.coordinate,
+            autoConvert: autoConvert
+        )
+    }
+
+    private static func perturbed(
+        _ coordinate: CLLocationCoordinate2D,
+        amplitude: Double
+    ) -> CLLocationCoordinate2D {
+        CLLocationCoordinate2D(
+            latitude: coordinate.latitude + Double.random(in: -amplitude...amplitude),
+            longitude: coordinate.longitude + Double.random(in: -amplitude...amplitude)
+        )
+    }
+
+    /// Frames 2-4 of the warm-up, 0.35 s apart: two further ~1 m perturbations and a final
+    /// near-exact frame. Frames go straight to the native layer so the UI phase, recovery
+    /// record and auto-detach trigger are not disturbed by each one.
+    private func startJitterFollowUp(around base: CLLocationCoordinate2D) {
+        jitterTask?.cancel()
+        jitterTask = Task { @MainActor [weak self] in
+            for frame in 2...4 {
+                try? await Task.sleep(for: Self.jitterFrameInterval)
+                guard
+                    !Task.isCancelled,
+                    let self,
+                    self.workerIsRunning,
+                    case .active = self.phase,
+                    let activeSession = self.activeSession
+                else { return }
+                let amplitude = frame == 4 ? Self.finalJitterAmplitude : Self.jitterAmplitude
+                let next = Self.perturbed(base, amplitude: amplitude)
+                guard rc_location_session_update(activeSession, next.latitude, next.longitude) == 0 else {
+                    return
+                }
+            }
+        }
     }
 
     private func nativeLocationFinished(
@@ -639,6 +763,9 @@ final class LocalDeviceSessionCoordinator: NSObject {
         guard activeRunIdentifier == runIdentifier else { return }
 
         backgroundKeepAlive.stop()
+        jitterTask?.cancel()
+        jitterTask = nil
+        jitterRequested = false
         activeRunIdentifier = nil
         activeSession = nil
         workerIsRunning = false
@@ -653,6 +780,21 @@ final class LocalDeviceSessionCoordinator: NSObject {
 
         if cancellationRequested {
             cancellationRequested = false
+            if isDetachedLocked {
+                if case .failure(let message) = outcome,
+                   message != "The location session was stopped." {
+                    // The final coordinate could not be flushed, so do not claim a lock.
+                    isDetachedLocked = false
+                    restorationStatus = "Lock not confirmed; location state unverified"
+                    clearPendingSession()
+                    phase = .failed(message)
+                    return
+                }
+                restorationStatus = "Location locked; tunnel detached"
+                clearPendingSession()
+                finishCancelledLocationSession()
+                return
+            }
             if case .failure(let message) = outcome,
                message != "The location session was stopped." {
                 restorationStatus = "Stop not confirmed; real location unverified"

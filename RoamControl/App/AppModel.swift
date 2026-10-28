@@ -29,6 +29,13 @@ final class AppModel {
     private(set) var interruptedSession: SessionRecoveryRecord?
     private(set) var isRestoringInterruptedSession = false
     private(set) var interruptedSessionError: String?
+    private(set) var isLocationLockedAndDetached: Bool
+    private(set) var lastLockedTarget: LocationTarget?
+    private(set) var detachNotice: String?
+
+    private let locationVerifier = LocationInjectionVerifier()
+    private var autoDetachTask: Task<Void, Never>?
+    private var isRestoringFromLock = false
 
     private var activeSessionRecovery: SessionRecoveryRecord?
     private var lastRecoverySaveDate: Date?
@@ -67,6 +74,13 @@ final class AppModel {
             in: preferences
         )
         self.interruptedSession = Self.recoveryRecord(in: preferences)
+        self.isLocationLockedAndDetached = preferences.bool(forKey: RoamPreferenceKeys.isLocationLockedAndDetached)
+        if let data = preferences.data(forKey: RoamPreferenceKeys.lastLockedLocation),
+           let target = try? JSONDecoder().decode(LocationTarget.self, from: data) {
+            self.lastLockedTarget = target
+        } else {
+            self.lastLockedTarget = nil
+        }
 
         onDevicePairing.onFailure = { [weak self] diagnostic in
             guard let self else { return }
@@ -246,6 +260,12 @@ final class AppModel {
         }
 
         selectedTarget = nil
+        isLocationLockedAndDetached = false
+        lastLockedTarget = nil
+        detachNotice = nil
+        autoDetachTask?.cancel()
+        autoDetachTask = nil
+        isRestoringFromLock = false
         favouriteLocations = []
         locationHistory = []
         appearance = .automatic
@@ -324,12 +344,110 @@ final class AppModel {
     }
 
     func startLocationSession(at target: LocationTarget) async {
+        // The map pin stays in GCJ-02. Correction to WGS-84 happens in the device session
+        // coordinator, the single funnel for fixed, walking and shortcut updates alike.
         await startLocationSession(
             at: target,
             selectedTarget: target,
             historyTarget: target,
-            recovery: .fixed(at: target)
+            recovery: .fixed(at: target),
+            jitter: true
         )
+    }
+
+    /// Leaves Lock & Detach state, in memory and in preferences.
+    private func clearLockedState() {
+        isLocationLockedAndDetached = false
+        detachNotice = nil
+        preferences.set(false, forKey: RoamPreferenceKeys.isLocationLockedAndDetached)
+    }
+
+    /// Enters Lock & Detach state and remembers which map location is being held.
+    private func markLocked(at target: LocationTarget) {
+        isLocationLockedAndDetached = true
+        detachNotice = nil
+        lastLockedTarget = target
+        preferences.set(true, forKey: RoamPreferenceKeys.isLocationLockedAndDetached)
+        if let data = try? JSONEncoder().encode(target) {
+            preferences.set(data, forKey: RoamPreferenceKeys.lastLockedLocation)
+        }
+    }
+
+    /// Restores the real GPS after a Lock & Detach. The tunnel is gone by then, so a fresh
+    /// session is opened and stopped as soon as it is active; stopping is what asks the device
+    /// to clear the simulation. The locked state is only cleared once that has succeeded.
+    func restoreRealLocation() async {
+        guard case .paired = pairingStatus else {
+            detachNotice = "Pair this iPhone before restoring its real location."
+            return
+        }
+        guard let target = lastLockedTarget ?? selectedTarget else {
+            clearLockedState()
+            return
+        }
+
+        detachNotice = nil
+        isRestoringFromLock = true
+        isRestoringInterruptedSession = true
+        restorationReachedActiveSession = false
+        restorationWasCancelled = false
+
+        do {
+            guard let pairingRecord = try await pairingService.pairingRecordData() else {
+                finishFailedLockRestoration(
+                    message: "The saved pairing record is unavailable. Pair this iPhone again."
+                )
+                return
+            }
+            deviceSession.start(pairingRecord: pairingRecord, target: target)
+        } catch {
+            finishFailedLockRestoration(message: error.localizedDescription)
+        }
+    }
+
+    private func finishFailedLockRestoration(message: String) {
+        isRestoringFromLock = false
+        isRestoringInterruptedSession = false
+        detachNotice = message
+        usageAnalytics.recordFailure(.locationPreparation, context: .restoration, enabled: sharesAnonymousUsageStatistics)
+        usageAnalytics.record(.locationRestoreFailed, enabled: sharesAnonymousUsageStatistics)
+    }
+
+    private func scheduleAutoDetach() {
+        guard autoDetachTask == nil else { return }
+        autoDetachTask = Task { @MainActor [weak self] in
+            await self?.detachAndLockCurrentLocation()
+            self?.autoDetachTask = nil
+        }
+    }
+
+    /// Lock & Detach: wait for the micro-jitter warm-up, confirm through CoreLocation that the
+    /// system really reports the injected position, then drop the tunnel without asking the
+    /// device to clear it.
+    func detachAndLockCurrentLocation() async {
+        guard case .active = deviceSession.phase else { return }
+
+        await deviceSession.waitForJitterToFinish()
+        guard
+            case .active = deviceSession.phase,
+            let injected = deviceSession.lastSentDeviceCoordinate
+        else { return }
+
+        // CoreLocation reports WGS-84, so compare with what was sent, not with the GCJ-02 pin.
+        switch await locationVerifier.verify(near: injected, tolerance: 50, timeout: .seconds(3)) {
+        case .confirmed:
+            break
+        case .mismatch(let distance):
+            detachNotice = "The system still reports a position \(Int(distance)) m away, so the tunnel was kept open."
+            return
+        case .unavailable:
+            // No location access or no fix: give the packets 1.5 s to reach locationd instead.
+            try? await Task.sleep(for: .milliseconds(1500))
+        }
+
+        guard case .active = deviceSession.phase, let held = selectedTarget else { return }
+        guard deviceSession.detach() else { return }
+        markLocked(at: held)
     }
 
     func startWalkingLocationSession(
@@ -345,7 +463,8 @@ final class AppModel {
                 from: initialTarget,
                 to: destination,
                 paceMetresPerSecond: paceMetresPerSecond
-            )
+            ),
+            jitter: false
         )
     }
 
@@ -353,11 +472,18 @@ final class AppModel {
         at deviceTarget: LocationTarget,
         selectedTarget: LocationTarget,
         historyTarget: LocationTarget,
-        recovery: SessionRecoveryRecord
+        recovery: SessionRecoveryRecord,
+        jitter: Bool
     ) async {
         guard case .paired = pairingStatus else {
             connectionState = .notConfigured
             return
+        }
+
+        // Starting or updating a location replaces whatever a previous lock was holding.
+        clearLockedState()
+        if let data = try? JSONEncoder().encode(selectedTarget) {
+            preferences.set(data, forKey: RoamPreferenceKeys.lastUsedLocation)
         }
 
         self.selectedTarget = selectedTarget
@@ -365,7 +491,7 @@ final class AppModel {
         activeSessionRecovery = recovery
         lastRecoverySaveDate = nil
         addToHistory(historyTarget)
-        switch deviceSession.updateLocation(deviceTarget) {
+        switch deviceSession.updateLocation(deviceTarget, jitter: jitter) {
         case .updated:
             usageAnalytics.record(
                 .activeLocationUpdated,
@@ -394,7 +520,11 @@ final class AppModel {
             pendingSessionAnalyticsEvent = recovery.kind == .walkingRoute
                 ? .walkingStarted
                 : .fixedLocationStarted
-            deviceSession.start(pairingRecord: pairingRecord, target: deviceTarget)
+            deviceSession.start(
+                pairingRecord: pairingRecord,
+                target: deviceTarget,
+                enableJitter: jitter
+            )
         } catch {
             activeSessionRecovery = nil
             pendingSessionAnalyticsEvent = nil
@@ -458,6 +588,14 @@ final class AppModel {
     }
 
     func stopLocationSession() {
+        // After Lock & Detach there is no tunnel to stop; restoring needs a fresh session.
+        if isLocationLockedAndDetached, case .idle = deviceSession.phase {
+            Task { await restoreRealLocation() }
+            return
+        }
+        clearLockedState()
+        autoDetachTask?.cancel()
+        autoDetachTask = nil
         isStoppingLocationSessionForRestoration = true
         deviceSession.stop()
     }
@@ -503,7 +641,11 @@ final class AppModel {
                 restorationWasCancelled = false
                 if didRestore {
                     dismissInterruptedSessionRecovery()
+                    if isRestoringFromLock {
+                        clearLockedState()
+                    }
                 }
+                isRestoringFromLock = false
             }
             clearActiveSessionRecovery()
             if case .paired = pairingStatus {
@@ -535,10 +677,24 @@ final class AppModel {
                 }
             } else {
                 persistActiveSessionRecovery(at: target)
+
+                let autoDetach = preferences.object(forKey: RoamPreferenceKeys.autoDetachAfterInject) as? Bool ?? true
+                if autoDetach, activeSessionRecovery?.kind == .fixedLocation {
+                    scheduleAutoDetach()
+                }
             }
         case .failed(let message):
             pendingSessionAnalyticsEvent = nil
             connectionState = .failed(message: message)
+            if isRestoringFromLock {
+                // Restoring failed, so the simulation is still held: keep the lock and say why.
+                isRestoringFromLock = false
+                detachNotice = message
+            } else if isLocationLockedAndDetached {
+                // The final flush failed; do not claim a lock that is not confirmed.
+                clearLockedState()
+                detachNotice = message
+            }
             if isRestoringInterruptedSession || isStoppingLocationSessionForRestoration {
                 let wasRestoringInterruptedSession = isRestoringInterruptedSession
                 if !restorationWasCancelled {

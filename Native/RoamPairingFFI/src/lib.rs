@@ -45,6 +45,7 @@ pub struct RemotePairingSession {
 #[repr(C)]
 pub struct LocationSession {
     cancelled: Arc<AtomicBool>,
+    detach_without_clearing: Arc<AtomicBool>,
     coordinates: Arc<Mutex<LocationCoordinates>>,
 }
 
@@ -268,6 +269,7 @@ pub unsafe extern "C" fn rc_pairing_record_matches_service(
 pub extern "C" fn rc_location_session_create() -> *mut LocationSession {
     Box::into_raw(Box::new(LocationSession {
         cancelled: Arc::new(AtomicBool::new(false)),
+        detach_without_clearing: Arc::new(AtomicBool::new(false)),
         coordinates: Arc::new(Mutex::new(LocationCoordinates {
             latitude: 0.0,
             longitude: 0.0,
@@ -278,6 +280,14 @@ pub extern "C" fn rc_location_session_create() -> *mut LocationSession {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rc_location_session_cancel(session: *mut LocationSession) {
     if let Some(session) = unsafe { session.as_ref() } {
+        session.cancelled.store(true, Ordering::Release);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rc_location_session_detach(session: *mut LocationSession) {
+    if let Some(session) = unsafe { session.as_ref() } {
+        session.detach_without_clearing.store(true, Ordering::Release);
         session.cancelled.store(true, Ordering::Release);
     }
 }
@@ -330,12 +340,14 @@ pub unsafe extern "C" fn rc_location_session_run(
 
     let session = unsafe { &*session };
     session.cancelled.store(false, Ordering::Release);
+    session.detach_without_clearing.store(false, Ordering::Release);
     let pairing_record =
         unsafe { std::slice::from_raw_parts(pairing_record, pairing_record_length).to_vec() };
     let peer_address = unsafe { optional_c_string(peer_address, "10.7.0.1") };
     let service_identifier = unsafe { optional_c_string(service_identifier, "") };
     let auth_tag = unsafe { optional_c_string(auth_tag, "") };
     let cancellation = Arc::clone(&session.cancelled);
+    let detach = Arc::clone(&session.detach_without_clearing);
     let coordinates = Arc::clone(&session.coordinates);
     if let Ok(mut current) = coordinates.lock() {
         *current = LocationCoordinates {
@@ -362,6 +374,7 @@ pub unsafe extern "C" fn rc_location_session_run(
             started_callback,
             callback_context,
             cancellation,
+            detach,
         ))
     }));
 
@@ -473,6 +486,7 @@ async fn run_location_session(
     started_callback: LocationStartedCallback,
     callback_context: usize,
     cancellation: Arc<AtomicBool>,
+    detach: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let mut applied_coordinates = current_coordinates(&coordinates)?;
     if remote_pairing_port == 0 || service_identifier.is_empty() || auth_tag.is_empty() {
@@ -601,7 +615,22 @@ async fn run_location_session(
         }
     }
 
-    await_location_clear(location.clear(), SESSION_TIMEOUT).await
+    if detach.load(Ordering::Acquire) {
+        // Lock & Detach: never send clear/stop. The loop above only polls every 200 ms, so
+        // write the newest coordinate once more to make sure the last warm-up frame is not
+        // lost, give locationd a moment to take it, then drop the connection silently.
+        let latest_coordinates = current_coordinates(&coordinates)?;
+        if latest_coordinates != applied_coordinates {
+            location
+                .set(latest_coordinates.latitude, latest_coordinates.longitude)
+                .await
+                .map_err(|_| "The iPhone ended the active location session.".to_string())?;
+        }
+        sleep(Duration::from_millis(300)).await;
+        Ok(())
+    } else {
+        await_location_clear(location.clear(), SESSION_TIMEOUT).await
+    }
 }
 
 async fn await_location_clear<E>(

@@ -258,6 +258,8 @@ struct HomeView: View {
                         isFavourite: mapModel.selectedLocation.map(appModel.isFavourite) ?? false,
                         isPaired: isPaired,
                         sessionPhase: appModel.deviceSession.phase,
+                        lockedTargetID: appModel.isLocationLockedAndDetached ? appModel.lastLockedTarget?.id : nil,
+                        statusNotice: appModel.detachNotice,
                         localDevVPNInstallURL: appModel.localDevVPNInstallURL,
                         isPreviewingWalkingRoute: walkingRoutePlanner.isLoading,
                         walkingRouteError: walkingRoutePlanner.errorMessage,
@@ -287,7 +289,14 @@ struct HomeView: View {
                         },
                         onStop: {
                             shouldClearLocationAfterRestoration = true
-                            appModel.stopLocationSession()
+                            if appModel.isLocationLockedAndDetached {
+                                Task { await appModel.restoreRealLocation() }
+                            } else {
+                                appModel.stopLocationSession()
+                            }
+                        },
+                        onDetach: {
+                            Task { await appModel.detachAndLockCurrentLocation() }
                         }
                     )
                     }
@@ -420,11 +429,15 @@ struct HomeView: View {
 
             guard oldPhase == .stopping, newPhase == .idle else { return }
             guard !isLocatingRealLocationAfterRestoration else { return }
+            // After Lock & Detach the device deliberately keeps the simulated spot, so do not
+            // recentre the map on the "real" location.
+            guard !appModel.isLocationLockedAndDetached else { return }
             shouldRefreshRealLocationWhenActive = true
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(3))
                 guard shouldRefreshRealLocationWhenActive, scenePhase == .active else { return }
                 shouldRefreshRealLocationWhenActive = false
+                guard !appModel.isLocationLockedAndDetached else { return }
                 guard case .idle = appModel.deviceSession.phase else { return }
                 mapModel.showRealLocationAfterSession()
             }

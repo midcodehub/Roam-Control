@@ -8,6 +8,9 @@ struct LocationSelectionCard: View {
     let isFavourite: Bool
     let isPaired: Bool
     let sessionPhase: DeviceSessionPhase
+    /// `LocationTarget.id` of the location currently held by Lock & Detach, if any.
+    var lockedTargetID: String? = nil
+    var statusNotice: String? = nil
     let localDevVPNInstallURL: URL
     let isPreviewingWalkingRoute: Bool
     let walkingRouteError: String?
@@ -16,6 +19,11 @@ struct LocationSelectionCard: View {
     let onPreviewWalkingRoute: () -> Void
     let onStart: () -> Void
     let onStop: () -> Void
+    var onDetach: () -> Void = {}
+
+    @AppStorage(RoamPreferenceKeys.autoConvertGCJ02) private var autoConvertGCJ02 = true
+    @AppStorage(RoamPreferenceKeys.enableLocationJitter) private var enableLocationJitter = true
+    @AppStorage(RoamPreferenceKeys.autoDetachAfterInject) private var autoDetachAfterInject = true
 
     @State private var didCopyCoordinates = false
     @State private var isConfirmingStop = false
@@ -66,7 +74,7 @@ struct LocationSelectionCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .tint(isShowingActiveTarget ? .red : .blue)
+                .tint(isShowingActiveTarget || showsRestoreAsPrimary ? .red : .blue)
                 .disabled(isPrimaryDisabled)
 
                 if canPreviewWalkingRoute {
@@ -95,8 +103,17 @@ struct LocationSelectionCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if isActive && !isShowingActiveTarget {
-                    Button("Stop & Restore", role: .destructive) {
+                if isShowingActiveTarget {
+                    Button(action: onDetach) {
+                        Label("Lock & Detach", systemImage: "lock.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                }
+
+                if (isActive && !isShowingActiveTarget) || (isLocked && !isLockedHere && sessionPhase == .idle) {
+                    Button(isActive ? "Stop & Restore" : "Restore Real Location", role: .destructive) {
                         isConfirmingStop = true
                     }
                         .buttonStyle(.bordered)
@@ -110,6 +127,14 @@ struct LocationSelectionCard: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .fixedSize(horizontal: false, vertical: true)
 
+                if let statusNotice {
+                    Text(statusNotice)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 if shouldOfferLocalDevVPN {
                     Link(destination: localDevVPNInstallURL) {
                         Label("Get LocalDevVPN", systemImage: "arrow.up.right.square")
@@ -117,6 +142,8 @@ struct LocationSelectionCard: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
+
+                simulationOptions
             } else {
                 HStack(spacing: 14) {
                     Image(systemName: "hand.tap")
@@ -134,6 +161,24 @@ struct LocationSelectionCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+
+    private var simulationOptions: some View {
+        DisclosureGroup("Simulation Options") {
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Auto-correct GCJ-02 → WGS-84", isOn: $autoConvertGCJ02)
+                Toggle("Micro-jitter after injecting", isOn: $enableLocationJitter)
+                Toggle("Auto Lock & Detach after inject", isOn: $autoDetachAfterInject)
+                Text("With auto-detach on, the tunnel is dropped once the location is confirmed, so LocalDevVPN can be turned off. Stop & Restore always reconnects to clear it.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.footnote)
+            .padding(.top, 6)
+        }
+        .font(.footnote.weight(.medium))
+        .tint(.secondary)
     }
 
     @ViewBuilder
@@ -260,6 +305,27 @@ struct LocationSelectionCard: View {
         return location.id == activeTarget.id
     }
 
+    private var isLocked: Bool {
+        lockedTargetID != nil
+    }
+
+    private var isLockedHere: Bool {
+        guard let lockedTargetID, let location else { return false }
+        return lockedTargetID == location.id
+    }
+
+    /// A held lock can only be released by reconnecting and clearing, so the primary button
+    /// becomes "Restore" for the locked location (also after a failed restore attempt).
+    private var showsRestoreAsPrimary: Bool {
+        guard isLockedHere else { return false }
+        switch sessionPhase {
+        case .idle, .failed:
+            return true
+        case .openingLocalDevVPN, .discovering, .connecting, .active, .stopping:
+            return false
+        }
+    }
+
     private var isWorking: Bool {
         switch sessionPhase {
         case .openingLocalDevVPN, .discovering, .connecting, .stopping:
@@ -280,6 +346,9 @@ struct LocationSelectionCard: View {
     }
 
     private var primaryTitle: String {
+        if showsRestoreAsPrimary {
+            return "Restore Real Location"
+        }
         switch sessionPhase {
         case .openingLocalDevVPN:
             "Opening LocalDevVPN…"
@@ -299,6 +368,9 @@ struct LocationSelectionCard: View {
     }
 
     private var primarySymbol: String {
+        if showsRestoreAsPrimary {
+            return "lock.slash.fill"
+        }
         switch sessionPhase {
         case .active: isShowingActiveTarget ? "stop.circle.fill" : "location.fill"
         case .failed: "arrow.clockwise"
@@ -330,6 +402,12 @@ struct LocationSelectionCard: View {
     }
 
     private var statusMessage: String {
+        if isLockedHere, sessionPhase == .idle {
+            return "🎯 Location locked in system. Tunnel detached (Safe to close LocalDevVPN). Tap above to restore real GPS."
+        }
+        if isLocked, sessionPhase == .idle, let location {
+            return "A different location is still locked. Starting \(location.name) replaces it; Restore Real Location clears it."
+        }
         switch sessionPhase {
         case .idle:
             return isPaired
@@ -354,7 +432,7 @@ struct LocationSelectionCard: View {
     }
 
     private func primaryAction() {
-        if isShowingActiveTarget {
+        if showsRestoreAsPrimary || isShowingActiveTarget {
             isConfirmingStop = true
         } else {
             onStart()

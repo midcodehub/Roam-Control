@@ -13,6 +13,11 @@ build/
 .build/
 .swiftpm/xcode/package.xcworkspace/xcuserdata/
 
+# Rust build output
+target/
+Native/RoamPairingFFI/target/
+
+
 # Archives / signing
 *.xcarchive
 *.ipa

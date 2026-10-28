@@ -71,6 +71,8 @@ RCLocationSession *rc_location_session_create(void);
 
 void rc_location_session_cancel(RCLocationSession *session);
 
+void rc_location_session_detach(RCLocationSession *session);
+
 int32_t rc_location_session_update(
     RCLocationSession *session,
     double latitude,

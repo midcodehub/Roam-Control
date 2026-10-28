@@ -11,6 +11,9 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @AppStorage(RoamPreferenceKeys.autoConvertGCJ02) private var autoConvertGCJ02 = true
+    @AppStorage(RoamPreferenceKeys.enableLocationJitter) private var enableLocationJitter = true
+    @AppStorage(RoamPreferenceKeys.autoDetachAfterInject) private var autoDetachAfterInject = true
     @State private var isShowingDeviceSetup = false
     @State private var isReplayingOnboarding = false
     @State private var isConfirmingReset = false
@@ -56,6 +59,16 @@ struct SettingsView: View {
                         }
                     }
                     .foregroundStyle(.primary)
+                }
+
+                Section {
+                    Toggle("Auto GCJ-02 to WGS-84 Correction", isOn: $autoConvertGCJ02)
+                    Toggle("Enable GPS Micro-Jitter", isOn: $enableLocationJitter)
+                    Toggle("Auto Freeze & Detach Tunnel", isOn: $autoDetachAfterInject)
+                } header: {
+                    Text("Simulation Engine")
+                } footer: {
+                    Text("When auto GCJ-02 is enabled, locations selected in Mainland China are corrected to WGS-84 before transmission while preserving map pin visuals. Micro-jitter sends a 4-frame warm-up sequence. Auto Freeze & Detach disconnects the tunnel once locked, allowing LocalDevVPN to be safely closed.")
                 }
 
                 Section {
