@@ -349,7 +349,7 @@ struct LocationSelectionCard: View {
         if showsRestoreAsPrimary {
             return "Restore Real Location"
         }
-        switch sessionPhase {
+        return switch sessionPhase {
         case .openingLocalDevVPN:
             "Opening LocalDevVPN…"
         case .discovering:
@@ -371,7 +371,7 @@ struct LocationSelectionCard: View {
         if showsRestoreAsPrimary {
             return "lock.slash.fill"
         }
-        switch sessionPhase {
+        return switch sessionPhase {
         case .active: isShowingActiveTarget ? "stop.circle.fill" : "location.fill"
         case .failed: "arrow.clockwise"
         case .idle: "location.fill"
@@ -408,7 +408,7 @@ struct LocationSelectionCard: View {
         if isLocked, sessionPhase == .idle, let location {
             return "A different location is still locked. Starting \(location.name) replaces it; Restore Real Location clears it."
         }
-        switch sessionPhase {
+        return switch sessionPhase {
         case .idle:
             return isPaired
                 ? "Start when ready. Stop restores this iPhone's real location."
