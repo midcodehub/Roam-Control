@@ -1,0 +1,109 @@
+name: Build and Package IPA
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish as a GitHub Release (requires release permissions)'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ipa:
+    name: Build Roam Control IPA
+    runs-on: macos-14
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Xcode
+        run: |
+          echo "=== Installed Xcode Applications ==="
+          ls -d /Applications/Xcode*.app || true
+          
+          # Prioritize Xcode 16 or latest available stable Xcode on runner
+          if [ -d "/Applications/Xcode_16.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.app
+          elif [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.4.app
+          elif [ -d "/Applications/Xcode.app" ]; then
+            sudo xcode-select -s /Applications/Xcode.app
+          fi
+          
+          echo "Selected developer directory:"
+          xcode-select -p
+          xcodebuild -version
+
+      - name: Verify native pairing framework
+        run: |
+          FRAMEWORK_PATH="Frameworks/RoamPairingFFI.xcframework"
+          if [ ! -d "${FRAMEWORK_PATH}" ]; then
+            echo "Error: Native xcframework missing at ${FRAMEWORK_PATH}!" >&2
+            exit 1
+          fi
+          echo "Native FFI framework present."
+          ls -la "${FRAMEWORK_PATH}"
+
+      - name: Build and Package IPA
+        id: package
+        run: |
+          mkdir -p output
+          ./scripts/package-ipa.sh output
+          
+          VERSION=$(grep -m1 "MARKETING_VERSION" RoamControl.xcodeproj/project.pbxproj | sed -E 's/.*= ([^;]+);/\1/' | tr -d ' "')
+          BUILD=$(grep -m1 "CURRENT_PROJECT_VERSION" RoamControl.xcodeproj/project.pbxproj | sed -E 's/.*= ([^;]+);/\1/' | tr -d ' "')
+          VERSION="${VERSION:-0.9.2}"
+          BUILD="${BUILD:-1}"
+          
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=RoamControl-v${VERSION}-b${BUILD}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: |
+            output/RoamControl*.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output/RoamControl*.ipa
+          name: "Roam Control v${{ steps.package.outputs.version }} (Build ${{ steps.package.outputs.build }})"
+          body: |
+            ## Roam Control Release
+
+            - **Version**: `${{ steps.package.outputs.version }}`
+            - **Build**: `${{ steps.package.outputs.build }}`
+            - **Target**: iOS 27+ (iPhone)
+            - **Installation**: Unsigned Release IPA for SideStore, AltStore, TrollStore or custom signing tools.
+
+            ### Assets
+            Download `RoamControl.ipa` below and install via SideStore / AltStore.
+          draft: false
+          prerelease: false
