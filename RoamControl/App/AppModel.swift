@@ -4,6 +4,10 @@ import Observation
 @MainActor
 @Observable
 final class AppModel {
+    /// The one model the running app uses. Shortcuts reach the live device session through it,
+    /// because a location simulation only holds while that session's connection stays open.
+    static let shared = AppModel()
+
     private static let onboardingKey = "hasCompletedOnboarding"
     private static let favouritesKey = "favouriteLocations"
     private static let hasSeenFavouriteReorderHintKey = "hasSeenFavouriteReorderHint"

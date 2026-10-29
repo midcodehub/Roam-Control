@@ -1,5 +1,4 @@
 import AppIntents
-import CoreLocation
 import Foundation
 
 // MARK: - Errors
@@ -18,78 +17,56 @@ enum RoamIntentError: Error, CustomLocalizedStringResourceConvertible {
 
 // MARK: - Shared Helpers
 
+/// Shortcuts drive the app's own `AppModel.shared` session instead of opening a private one.
+///
+/// The DVT location-simulation service only holds the simulated position while its connection
+/// stays open, so a shortcut cannot inject a location and then drop the tunnel. Both intents
+/// therefore open Roam Control: the session starts in the foreground exactly like the Start
+/// button, and the app's background keep-alive holds it after the user switches away.
 @MainActor
 enum RoamIntentSupport {
-    /// Opens a device session for `target` and waits until the tunnel is active.
-    ///
-    /// `target` is the map-facing (GCJ-02) coordinate. GCJ-02 → WGS-84 correction happens inside
-    /// `LocalDeviceSessionCoordinator`, so callers must not convert beforehand.
-    static func startSession(
-        for target: LocationTarget,
-        enableJitter: Bool
-    ) async throws -> LocalDeviceSessionCoordinator {
-        guard let pairingRecord = try await SecurePairingService().pairingRecordData() else {
+    /// Covers the 3 s tunnel pre-check plus a LocalDevVPN round trip when no tunnel is up yet.
+    static let sessionTimeout: Duration = .seconds(30)
+
+    /// Loads the pairing status if the app was launched by the shortcut and has not read it yet.
+    static func ensurePaired(_ appModel: AppModel) async throws {
+        if case .paired = appModel.pairingStatus { return }
+        await appModel.restorePairingStatus()
+        guard case .paired = appModel.pairingStatus else {
             throw RoamIntentError.message(
                 "No pairing record found. Please pair this device in Roam Control first."
             )
         }
-
-        let coordinator = LocalDeviceSessionCoordinator()
-        coordinator.start(pairingRecord: pairingRecord, target: target, enableJitter: enableJitter)
-
-        // The background intent cannot bring up LocalDevVPN by itself, so give the tunnel up to
-        // 15 seconds before reporting a connection problem. A proxy app that already reflects
-        // 10.7.0.1 is picked up by the coordinator's pre-check without opening LocalDevVPN.
-        do {
-            for _ in 0..<60 {
-                try await Task.sleep(for: .milliseconds(250))
-                switch coordinator.phase {
-                case .active:
-                    return coordinator
-                case .failed(let message):
-                    throw RoamIntentError.message(message)
-                default:
-                    continue
-                }
-            }
-        } catch {
-            coordinator.stop()
-            throw error
-        }
-
-        coordinator.stop()
-        throw RoamIntentError.message(
-            "Connection timed out. Turn on LocalDevVPN (or a proxy app that reflects 10.7.0.1) first, then run this shortcut again."
-        )
     }
 
-    /// Waits for a stopping session to settle. Returns the failure message, or `nil` on success.
-    static func settle(_ coordinator: LocalDeviceSessionCoordinator, timeout: Duration) async -> String? {
+    static func isTransitioning(_ phase: DeviceSessionPhase) -> Bool {
+        switch phase {
+        case .openingLocalDevVPN, .discovering, .connecting, .stopping:
+            return true
+        case .idle, .active, .failed:
+            return false
+        }
+    }
+
+    /// Polls `condition` until it returns a value or `timeout` passes. Returns `nil` on timeout.
+    static func wait<T>(
+        timeout: Duration,
+        until condition: () throws -> T?
+    ) async throws -> T? {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         while clock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(150))
-            switch coordinator.phase {
-            case .idle:
-                return nil
-            case .failed(let message):
-                return message
-            default:
-                continue
+            if let value = try condition() {
+                return value
             }
+            try await Task.sleep(for: .milliseconds(250))
         }
-        return "The session did not finish in time."
+        return try condition()
     }
 
     static func storedTarget(forKey key: String, in preferences: UserDefaults) -> LocationTarget? {
         guard let data = preferences.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(LocationTarget.self, from: data)
-    }
-
-    static func store(_ target: LocationTarget, forKey key: String, in preferences: UserDefaults) {
-        if let data = try? JSONEncoder().encode(target) {
-            preferences.set(data, forKey: key)
-        }
     }
 }
 
@@ -145,9 +122,10 @@ struct SavedLocationQuery: EntityQuery, Sendable {
 struct SimulateLocationIntent: AppIntent {
     static let title: LocalizedStringResource = "Simulate Location"
     static let description = IntentDescription(
-        "Simulate a custom GPS location or a saved place with auto GCJ-02 correction, micro-jitter, and silent detachment."
+        "Opens Roam Control and simulates a custom GPS location or a saved place, with auto GCJ-02 correction. Keep Roam Control running in the background to hold the location."
     )
-    static let openAppWhenRun: Bool = false
+    // The session has to start in the foreground so the app can keep it open in the background.
+    static let openAppWhenRun: Bool = true
 
     @Parameter(title: "Saved Place", description: "Select from your saved favourites")
     var savedPlace: SavedLocationEntity?
@@ -201,46 +179,54 @@ struct SimulateLocationIntent: AppIntent {
             )
         }
 
-        // 2. Connect. The coordinator applies GCJ-02 → WGS-84 correction and the jitter frames.
-        let jitter = prefs.object(forKey: RoamPreferenceKeys.enableLocationJitter) as? Bool ?? true
-        let coordinator = try await RoamIntentSupport.startSession(for: requested, enableJitter: jitter)
+        let appModel = AppModel.shared
+        let session = appModel.deviceSession
+        try await RoamIntentSupport.ensurePaired(appModel)
 
-        // 3. Let the micro-jitter warm-up write its final frame.
-        await coordinator.waitForJitterToFinish()
+        // 2. Let a start or stop that is already under way settle; a busy coordinator ignores
+        //    a new start, which would otherwise report the previous target as this one.
+        _ = try await RoamIntentSupport.wait(timeout: .seconds(15)) {
+            RoamIntentSupport.isTransitioning(session.phase) ? nil : true
+        }
 
-        // 4. Confirm with CoreLocation against the WGS-84 value that was really sent.
-        if let sent = coordinator.lastSentDeviceCoordinate {
-            let verifier = LocationInjectionVerifier()
-            switch await verifier.verify(near: sent) {
-            case .confirmed:
-                break
-            case .mismatch(let distance):
-                coordinator.stop()
-                throw RoamIntentError.message(
-                    "The system location is still \(Int(distance)) m away from the target, so the lock was cancelled."
-                )
-            case .unavailable:
-                // Location access is off, so give locationd a moment instead.
-                try? await Task.sleep(for: .milliseconds(1500))
+        // 3. Same path as the Start button: an active session is moved to the new target,
+        //    otherwise a new one is opened. Starting also clears any earlier Lock & Detach state.
+        //    GCJ-02 → WGS-84 correction and the jitter warm-up happen in the coordinator.
+        await appModel.startLocationSession(at: requested)
+
+        let outcome = try await RoamIntentSupport.wait(timeout: RoamIntentSupport.sessionTimeout) {
+            () -> Result<Void, RoamIntentError>? in
+            switch session.phase {
+            case .active:
+                return .success(())
+            case .failed(let message):
+                return .failure(.message(message))
+            case .idle:
+                // Starting never returns to idle on its own, so this means it was cancelled.
+                return .failure(.message("The location session was cancelled."))
+            case .openingLocalDevVPN, .discovering, .connecting, .stopping:
+                return nil
             }
         }
 
-        // 5. Lock & Detach. This never sends a clear/stop command.
-        guard coordinator.detach() else {
-            coordinator.stop()
-            throw RoamIntentError.message("The session ended before the location could be locked.")
-        }
-        if let failure = await RoamIntentSupport.settle(coordinator, timeout: .seconds(6)) {
-            throw RoamIntentError.message(failure)
+        switch outcome {
+        case .success:
+            break
+        case .failure(let error):
+            throw error
+        case nil:
+            throw RoamIntentError.message(
+                "Connection timed out. Turn on LocalDevVPN (or a proxy app that reflects 10.7.0.1) first, then run this shortcut again."
+            )
         }
 
-        // 6. Persist for the app UI, the next shortcut run and the restore intent.
-        prefs.set(true, forKey: RoamPreferenceKeys.isLocationLockedAndDetached)
-        RoamIntentSupport.store(requested, forKey: RoamPreferenceKeys.lastLockedLocation, in: prefs)
-        RoamIntentSupport.store(requested, forKey: RoamPreferenceKeys.lastUsedLocation, in: prefs)
+        // 4. Let the micro-jitter warm-up write its final frame before reporting success.
+        await session.waitForJitterToFinish()
 
         return .result(
-            dialog: IntentDialog("Location locked at \(requested.name). It is safe to turn off LocalDevVPN now.")
+            dialog: IntentDialog(
+                "Simulating \(requested.name). Keep Roam Control running in the background; closing it from the app switcher restores the real location."
+            )
         )
     }
 }
@@ -250,35 +236,54 @@ struct SimulateLocationIntent: AppIntent {
 struct StopLocationSimulationIntent: AppIntent {
     static let title: LocalizedStringResource = "Stop Location Simulation"
     static let description = IntentDescription(
-        "Stop location simulation and restore this iPhone's real GPS position."
+        "Opens Roam Control, stops location simulation and restores this iPhone's real GPS position."
     )
-    static let openAppWhenRun: Bool = false
+    // Restoring an earlier Lock & Detach needs a fresh session, which must start in the foreground.
+    static let openAppWhenRun: Bool = true
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let prefs = UserDefaults.standard
+        let appModel = AppModel.shared
+        let session = appModel.deviceSession
+        try await RoamIntentSupport.ensurePaired(appModel)
 
-        // A detached lock can only be cleared by reconnecting, so reconnect at the held location
-        // (no jitter) and immediately ask the device to clear it.
-        guard let anchor = RoamIntentSupport.storedTarget(
-            forKey: RoamPreferenceKeys.lastLockedLocation,
-            in: prefs
-        ) ?? RoamIntentSupport.storedTarget(forKey: RoamPreferenceKeys.lastUsedLocation, in: prefs) else {
-            throw RoamIntentError.message("No simulated location is recorded, so there is nothing to restore.")
+        if case .idle = session.phase, !appModel.isLocationLockedAndDetached {
+            return .result(dialog: IntentDialog("No location simulation is running."))
         }
 
-        let coordinator = try await RoamIntentSupport.startSession(for: anchor, enableJitter: false)
-        coordinator.stop()
+        // Same path as the Stop button: an open session asks the device to clear the simulation;
+        // an earlier Lock & Detach (no open session) reconnects first and then clears it.
+        let noticeBeforeStop = appModel.detachNotice
+        appModel.stopLocationSession()
 
-        // Keep the lock flag until the device really confirmed the clear.
-        if let failure = await RoamIntentSupport.settle(coordinator, timeout: .seconds(10)) {
-            throw RoamIntentError.message(failure)
+        let outcome = try await RoamIntentSupport.wait(timeout: RoamIntentSupport.sessionTimeout) {
+            () -> Result<Void, RoamIntentError>? in
+            if case .failed(let message) = session.phase {
+                return .failure(.message(message))
+            }
+            if appModel.isLocationLockedAndDetached,
+               let notice = appModel.detachNotice, notice != noticeBeforeStop {
+                // Restoring a lock failed before a session could start (for example no pairing).
+                return .failure(.message(notice))
+            }
+            if case .idle = session.phase, !appModel.isLocationLockedAndDetached {
+                return .success(())
+            }
+            return nil
         }
-        prefs.set(false, forKey: RoamPreferenceKeys.isLocationLockedAndDetached)
 
-        return .result(
-            dialog: IntentDialog("Location simulation stopped. The real location will be restored shortly.")
-        )
+        switch outcome {
+        case .success:
+            return .result(
+                dialog: IntentDialog("Location simulation stopped. The real location will be restored shortly.")
+            )
+        case .failure(let error):
+            throw error
+        case nil:
+            throw RoamIntentError.message(
+                "Restoring the real location did not finish in time. Open Roam Control to check its status."
+            )
+        }
     }
 }
 
@@ -290,7 +295,7 @@ struct RoamShortcutsProvider: AppShortcutsProvider {
             intent: SimulateLocationIntent(),
             phrases: [
                 "Simulate location with \(.applicationName)",
-                "Lock location with \(.applicationName)"
+                "Start location with \(.applicationName)"
             ],
             shortTitle: "Simulate Location",
             systemImageName: "location.fill"
@@ -302,7 +307,7 @@ struct RoamShortcutsProvider: AppShortcutsProvider {
                 "Restore real location with \(.applicationName)"
             ],
             shortTitle: "Restore Real Location",
-            systemImageName: "lock.slash.fill"
+            systemImageName: "location.slash.fill"
         )
     }
 }

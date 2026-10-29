@@ -4,7 +4,7 @@ import SwiftUI
 struct RoamControlApp: App {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
-    @State private var appModel = AppModel()
+    @State private var appModel = AppModel.shared
 
     var body: some Scene {
         WindowGroup {
