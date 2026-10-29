@@ -1,0 +1,20 @@
+RoamControl/Features/Home/HomeView.swift
+  s_6b61817de6ac31::t_fe38974dc405b3 546-559
+  s_6b61817de6ac31::t_fe64f7c70cb9a4 405-406,415-419
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "adb7faa80653370e0dee8789b8a63b7ab8bab3d8",
+  "prompts": {},
+  "sessions": {
+    "s_6b61817de6ac31": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "57923c3c-de6f-4ee3-8c9a-4a9cca9d648c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "midcodehub <midcode@foxmail.com>"
+    }
+  }
+}
