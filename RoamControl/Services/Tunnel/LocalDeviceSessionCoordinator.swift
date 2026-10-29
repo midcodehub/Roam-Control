@@ -45,6 +45,9 @@ final class LocalDeviceSessionCoordinator: NSObject {
     private static let localDevVPNPeerAddress = "10.7.0.1"
     private static let enableURL = URL(string: "localdevvpn://enable?scheme=roamcontrol")!
     private static let minimumRestorationDisplayDuration: TimeInterval = 1.2
+    /// How long to look for an already-working tunnel before opening LocalDevVPN. Covers a
+    /// Bonjour resolve plus a few 0.9 s probes; the old Wi-Fi path waited 2.5 s before opening.
+    private static let tunnelPrecheckWindow: Duration = .seconds(3)
 
     private(set) var phase: DeviceSessionPhase = .idle {
         didSet {
@@ -119,10 +122,10 @@ final class LocalDeviceSessionCoordinator: NSObject {
     private var discoveredServices: [NetService] = []
     private var discoveryTimeout: Task<Void, Never>?
     private var automaticDiscoveryTask: Task<Void, Never>?
-    private var networkDecisionTask: Task<Void, Never>?
+    private var tunnelPrecheckTask: Task<Void, Never>?
+    private var isTunnelPrecheckActive = false
     private var mobileDataDiscoveryLoopTask: Task<Void, Never>?
     private var mobileDataGuidanceDelay: Task<Void, Never>?
-    private var localDevVPNProbeTask: Task<Void, Never>?
     private var localDevVPNReturnTimeout: Task<Void, Never>?
     private var pendingSession: PendingSession?
     private var resolvedService: RemotePairingService?
@@ -448,7 +451,6 @@ final class LocalDeviceSessionCoordinator: NSObject {
 
     private func beginDiscovery(
         reportTimeout: Bool = true,
-        openLocalDevVPNIfUnavailable: Bool = false,
         showConnectionHelpIfUnavailable: Bool = false
     ) {
         cleanupDiscovery()
@@ -470,23 +472,6 @@ final class LocalDeviceSessionCoordinator: NSObject {
                     self.resolvedService == nil
                 else { return }
                 self.showConnectionHelp()
-            }
-        }
-
-        if openLocalDevVPNIfUnavailable {
-            localDevVPNProbeTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(2.5))
-                guard
-                    !Task.isCancelled,
-                    let self,
-                    self.pendingSession != nil,
-                    self.phase == .discovering,
-                    !self.workerIsRunning,
-                    self.resolvedService == nil
-                else { return }
-
-                self.localDevVPNProbeTask = nil
-                self.openLocalDevVPNForPendingSession()
             }
         }
 
@@ -865,8 +850,6 @@ final class LocalDeviceSessionCoordinator: NSObject {
         discoveryTimeout = nil
         mobileDataGuidanceDelay?.cancel()
         mobileDataGuidanceDelay = nil
-        localDevVPNProbeTask?.cancel()
-        localDevVPNProbeTask = nil
         browser.stop()
 
         for service in discoveredServices {
@@ -943,6 +926,7 @@ final class LocalDeviceSessionCoordinator: NSObject {
         guard phase == .discovering, pendingSession != nil else { return }
 
         if reachable {
+            finishTunnelPrecheck()
             serviceProbeAttemptCount = 0
             resolvedService = service
             mobileDataDiscoveryLoopTask?.cancel()
@@ -952,6 +936,13 @@ final class LocalDeviceSessionCoordinator: NSObject {
             }
             cleanupDiscovery()
             submitLocationTask()
+            return
+        }
+
+        // During the pre-check a proxy tunnel may still be settling, so keep probing until the
+        // window closes instead of jumping to LocalDevVPN on the first miss.
+        if isTunnelPrecheckActive {
+            retryServiceProbe(service)
             return
         }
 
@@ -972,6 +963,10 @@ final class LocalDeviceSessionCoordinator: NSObject {
             return
         }
 
+        retryServiceProbe(service)
+    }
+
+    private func retryServiceProbe(_ service: RemotePairingService) {
         serviceProbeRetryTask?.cancel()
         serviceProbeRetryTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(650))
@@ -997,8 +992,7 @@ final class LocalDeviceSessionCoordinator: NSObject {
         retryTelemetry.reset()
         automaticDiscoveryTask?.cancel()
         automaticDiscoveryTask = nil
-        networkDecisionTask?.cancel()
-        networkDecisionTask = nil
+        finishTunnelPrecheck()
         mobileDataDiscoveryLoopTask?.cancel()
         mobileDataDiscoveryLoopTask = nil
         localDevVPNReturnTimeout?.cancel()
@@ -1033,38 +1027,49 @@ final class LocalDeviceSessionCoordinator: NSObject {
             || message.localizedCaseInsensitiveContains("open the secure device tunnel")
     }
 
+    /// Every start first checks whether 10.7.0.1 already reaches this iPhone, on Wi-Fi and
+    /// mobile data alike. LocalDevVPN is not the only tunnel that can provide it: proxy apps such
+    /// as Clash Mi (`tun.loopback-address`), Shadowrocket, Loon or Surge can reflect 10.7.0.1 too.
+    /// Opening LocalDevVPN would replace whichever VPN is running, so it is only opened when
+    /// nothing answers within the pre-check window.
     private func routeStartupForCurrentNetwork() {
-        networkDecisionTask?.cancel()
-        networkDecisionTask = nil
+        tunnelPrecheckTask?.cancel()
+        tunnelPrecheckTask = nil
         mobileDataGuidance = nil
 
-        if wifiPathStatusIsKnown {
-            if isWiFiPathSatisfied {
-                beginDiscovery(openLocalDevVPNIfUnavailable: true)
-            } else {
-                isMobileDataStartupMode = true
-                openLocalDevVPNForPendingSession()
-            }
-            return
-        }
+        // Discover quietly: no timeout failure, no LocalDevVPN jump. A failed probe is retried
+        // by `handleServiceProbeResult` while `isTunnelPrecheckActive` is set.
+        beginDiscovery(reportTimeout: false)
+        isTunnelPrecheckActive = true
 
-        networkDecisionTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(600))
+        tunnelPrecheckTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.tunnelPrecheckWindow)
             guard
                 !Task.isCancelled,
                 let self,
+                self.isTunnelPrecheckActive,
                 self.pendingSession != nil,
+                self.phase == .discovering,
                 !self.workerIsRunning
             else { return }
 
-            self.networkDecisionTask = nil
+            self.tunnelPrecheckTask = nil
+            self.isTunnelPrecheckActive = false
+
+            // Nothing reachable yet: fall back to the original LocalDevVPN flows. An unknown
+            // Wi-Fi state is treated as Wi-Fi, matching the previous behaviour.
             if self.wifiPathStatusIsKnown, !self.isWiFiPathSatisfied {
                 self.isMobileDataStartupMode = true
-                self.openLocalDevVPNForPendingSession()
-            } else {
-                self.beginDiscovery(openLocalDevVPNIfUnavailable: true)
             }
+            self.openLocalDevVPNForPendingSession()
         }
+    }
+
+    /// Ends the pre-check without falling back to LocalDevVPN.
+    private func finishTunnelPrecheck() {
+        tunnelPrecheckTask?.cancel()
+        tunnelPrecheckTask = nil
+        isTunnelPrecheckActive = false
     }
 
     private func enterMobileDataGuidance() {

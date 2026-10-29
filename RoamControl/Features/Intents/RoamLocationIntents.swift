@@ -38,7 +38,8 @@ enum RoamIntentSupport {
         coordinator.start(pairingRecord: pairingRecord, target: target, enableJitter: enableJitter)
 
         // The background intent cannot bring up LocalDevVPN by itself, so give the tunnel up to
-        // 15 seconds before reporting a connection problem.
+        // 15 seconds before reporting a connection problem. A proxy app that already reflects
+        // 10.7.0.1 is picked up by the coordinator's pre-check without opening LocalDevVPN.
         do {
             for _ in 0..<60 {
                 try await Task.sleep(for: .milliseconds(250))
@@ -58,7 +59,7 @@ enum RoamIntentSupport {
 
         coordinator.stop()
         throw RoamIntentError.message(
-            "Connection timed out. Turn on LocalDevVPN first, then run this shortcut again."
+            "Connection timed out. Turn on LocalDevVPN (or a proxy app that reflects 10.7.0.1) first, then run this shortcut again."
         )
     }
 
