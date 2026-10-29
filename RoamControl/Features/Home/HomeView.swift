@@ -402,6 +402,8 @@ struct HomeView: View {
             if isShowingDeviceSetup {
                 appModel.deviceSetupWasPresented()
             }
+            // A shortcut can start the session before this view first appears.
+            showActiveSessionTarget()
         }
         .onChange(of: appModel.deviceSession.phase) { oldPhase, newPhase in
             walkingSimulation.handleDeviceSessionPhase(
@@ -410,7 +412,11 @@ struct HomeView: View {
             )
 
             switch newPhase {
-            case .openingLocalDevVPN, .discovering, .connecting, .active, .stopping:
+            case .active:
+                shouldRefreshRealLocationWhenActive = false
+                mapModel.invalidateRealLocationCache()
+                showActiveSessionTarget()
+            case .openingLocalDevVPN, .discovering, .connecting, .stopping:
                 shouldRefreshRealLocationWhenActive = false
                 mapModel.invalidateRealLocationCache()
             case .idle:
@@ -535,6 +541,20 @@ struct HomeView: View {
             return true
         }
         return false
+    }
+
+    /// Selects and centres the location the device session is simulating.
+    ///
+    /// Sessions started from Shortcuts go straight through `AppModel`, so the map's own selection
+    /// (which drives the marker and the Stop / Lock & Detach card) would otherwise stay empty.
+    /// A walk moves the active target every step and keeps its own destination selected, so
+    /// it is left alone.
+    private func showActiveSessionTarget() {
+        guard case .active(let target) = appModel.deviceSession.phase else { return }
+        guard !walkingSimulation.locksDestination else { return }
+        guard mapModel.selectedLocation?.id != target.id else { return }
+        walkingRoutePlanner.clear()
+        mapModel.show(target)
     }
 
     private var shouldShowRealLocation: Bool {
