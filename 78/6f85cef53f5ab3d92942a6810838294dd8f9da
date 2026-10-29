@@ -1,0 +1,29 @@
+RoamControl/Features/Intents/RoamLocationIntents.swift
+  s_6b61817de6ac31::t_2476a406c0afbb 41-42
+  s_6b61817de6ac31::t_3d9b76ed25a9a4 62
+RoamControl/Services/Tunnel/LocalDeviceSessionCoordinator.swift
+  s_6b61817de6ac31::t_350237bc26dab1 48-50
+  s_6b61817de6ac31::t_8b78bb30a3c310 125,1036-1037,1045,1056
+  s_6b61817de6ac31::t_2333474426de85 126
+  s_6b61817de6ac31::t_41dd53aeb8e83a 929
+  s_6b61817de6ac31::t_9d337de60d1d0a 995
+  s_6b61817de6ac31::t_28208af3e801c5 942-948,966-969,1073
+  s_6b61817de6ac31::t_689bcfadc60504 1030-1034,1040-1043,1046,1050,1052,1057-1060,1064,1068-1072
+  s_6b61817de6ac31::t_6fe7f590d45e16 1074
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "786f85cef53f5ab3d92942a6810838294dd8f9da",
+  "prompts": {},
+  "sessions": {
+    "s_6b61817de6ac31": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "57923c3c-de6f-4ee3-8c9a-4a9cca9d648c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "midcodehub <midcode@foxmail.com>"
+    }
+  }
+}
